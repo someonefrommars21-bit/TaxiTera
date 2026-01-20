@@ -1,57 +1,81 @@
 import Terminal from "../models/Terminal.model.js";
+import { getCoordinates } from "../utils/geo.utils.js";
 
 export const searchTerminals = async (req, res) => {
   try {
-    // DEBUG: Is req.user set?
-    console.log("DEBUG Controller - User is:", req.user ? req.user.username : "Guest (Not Logged In)");
+    let {
+      latitude,
+      longitude,
+      from,           // place name string
+      destination,
+      maxDistance = 5000,
+    } = req.body;
 
-    const { latitude, longitude, destination } = req.body;
+    let resolvedLat = latitude ? parseFloat(latitude) : null;
+    let resolvedLng = longitude ? parseFloat(longitude) : null;
+    let resolvedFromName = 'Current Location';
 
-    if (!latitude || !longitude) {
-      return res.status(400).json({ message: "User location is required" });
+    // Priority 1: coordinates provided → use them
+    if (resolvedLat && resolvedLng) {
+      // good to go
+    }
+    // Priority 2: no coordinates but from text provided → geocode it
+    else if (from?.trim()) {
+      const coords = await getCoordinates(from.trim());
+      if (coords) {
+        resolvedLat = coords.lat;
+        resolvedLng = coords.lng;
+        resolvedFromName = coords.displayName || from.trim();
+      } else {
+        return res.status(404).json({
+          message: `Could not resolve location: "${from}"`,
+          suggestion: "Try a more specific name like 'Merkato' or 'Bole'",
+        });
+      }
+    }
+    // Priority 3: nothing useful → error
+    else {
+      return res.status(400).json({
+        message: "Location required: provide coordinates or a starting place name",
+      });
     }
 
-    const userLatitude = parseFloat(latitude);
-    const userLongitude = parseFloat(longitude);
+    // Basic coordinate validation
+    if (isNaN(resolvedLat) || isNaN(resolvedLng) || resolvedLat < -90 || resolvedLat > 90 || resolvedLng < -180 || resolvedLng > 180) {
+      return res.status(400).json({ message: "Invalid coordinates" });
+    }
 
+    // Build query
     const query = {
       location: {
         $near: {
-          $geometry: {
-            type: "Point",
-            coordinates: [userLongitude, userLatitude],
-          },
-          $maxDistance: 10000, 
+          $geometry: { type: "Point", coordinates: [resolvedLng, resolvedLat] },
+          $maxDistance: Number(maxDistance),
         },
       },
     };
 
-    if (destination) {
-      query.routes = { $in: [destination] };
+    if (destination?.trim()) {
+      query.routes = { $regex: destination.trim(), $options: 'i' }; // fuzzy
     }
 
     const terminals = await Terminal.find(query);
 
-    if (!terminals.length) {
-      return res.status(200).json([]);
-    }
-
-    // DEBUG: Check the raw data from Database
-    console.log("DEBUG Controller - First DB Result Price:", terminals[0].price);
-
-    const response = terminals.map((terminal) => ({
-      _id: terminal._id,
-      name: terminal.name,
-      area: terminal.area,
-      routes: terminal.routes,
-      location: terminal.location,
-      // LOGIC: Show price ONLY if req.user exists
-      price: req.user ? terminal.price : null, 
+    const results = terminals.map(t => ({
+      ...t.toObject(),
+      price: req.user ? t.price : null,
     }));
 
-    res.status(200).json(response);
+    res.json({
+      results,
+      resolvedLocation: {
+        lat: resolvedLat,
+        lng: resolvedLng,
+        fromName: resolvedFromName,
+      },
+    });
   } catch (error) {
-    console.error("searchTerminals error:", error);
-    res.status(500).json({ message: error.message });
+    console.error('searchTerminals error:', error);
+    res.status(500).json({ message: "Server error during search" });
   }
 };
